@@ -27,12 +27,15 @@ jobs:
         env:
           HEAD_BRANCH: ${{ github.event.workflow_run.head_branch }}
         run: |
+          # Only the "prod" Terraform workspace has infra applied right now
+          # (cost reasons) — both branches read IRSA ARNs from it. gitops
+          # branch/values file still split by head branch so dev vs prod
+          # app config stay separate within the one cluster.
+          echo "tf_workspace=prod" >> "$GITHUB_OUTPUT"
           if [ "$HEAD_BRANCH" = "main" ]; then
-            echo "tf_workspace=prod" >> "$GITHUB_OUTPUT"
             echo "gitops_branch=main" >> "$GITHUB_OUTPUT"
             echo "values_file=values-prod.yaml" >> "$GITHUB_OUTPUT"
           else
-            echo "tf_workspace=dev" >> "$GITHUB_OUTPUT"
             echo "gitops_branch=develop" >> "$GITHUB_OUTPUT"
             echo "values_file=values-dev.yaml" >> "$GITHUB_OUTPUT"
           fi
