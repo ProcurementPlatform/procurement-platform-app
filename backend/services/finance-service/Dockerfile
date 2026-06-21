@@ -7,7 +7,7 @@ COPY backend/shared/common/package.json ./backend/shared/common/
 COPY backend/shared/middleware/package.json ./backend/shared/middleware/
 COPY backend/shared/utils/package.json ./backend/shared/utils/
 COPY backend/services/finance-service/package.json ./backend/services/finance-service/
-RUN npm install
+RUN npm install --ignore-scripts
 
 COPY backend/shared ./backend/shared
 COPY backend/services/finance-service ./backend/services/finance-service
@@ -22,27 +22,27 @@ COPY backend/shared/common/package.json ./backend/shared/common/
 COPY backend/shared/middleware/package.json ./backend/shared/middleware/
 COPY backend/shared/utils/package.json ./backend/shared/utils/
 COPY backend/services/finance-service/package.json ./backend/services/finance-service/
-RUN npm ci --omit=dev
+RUN npm ci --omit=dev --ignore-scripts
 
 FROM node:20-alpine
 
-RUN apk update && apk upgrade --no-cache
-RUN apk add --no-cache chromium nss freetype harfbuzz ca-certificates ttf-freefont
+RUN apk upgrade --no-cache \
+    && apk add --no-cache chromium nss freetype harfbuzz ca-certificates ttf-freefont \
+    && addgroup -S app && adduser -S app -G app
+
 ENV PUPPETEER_SKIP_DOWNLOAD=true
 ENV PUPPETEER_EXECUTABLE_PATH=/usr/bin/chromium-browser
-
-RUN addgroup -S app && adduser -S app -G app
-
-WORKDIR /app
-COPY --from=prod-deps /app/node_modules ./node_modules
-COPY --from=builder /app/package.json ./
-COPY --from=builder /app/backend/shared ./backend/shared
-COPY --from=builder /app/backend/services/finance-service ./backend/services/finance-service
-
 ENV NODE_ENV=production
 ENV PORT=5002
+
+WORKDIR /app
+COPY --chown=app:app --from=prod-deps /app/node_modules ./node_modules
+COPY --chown=app:app --from=builder /app/package.json ./
+COPY --chown=app:app --from=builder /app/backend/shared ./backend/shared
+COPY --chown=app:app --from=builder /app/backend/services/finance-service ./backend/services/finance-service
+
+RUN mkdir -p logs && chown app:app logs
 EXPOSE 5002
-RUN mkdir -p logs && chown -R app:app /app
 USER app
 
 CMD ["node", "backend/services/finance-service/dist/server.js"]
