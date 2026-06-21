@@ -8,41 +8,45 @@ on:
 permissions:
   id-token: write
   contents: read
+  actions: read # needed to download the image-tag artifact from the triggering run
 
 env:
   AWS_REGION: us-east-1
 
 jobs:
   deploy:
-    # Only deploy for the dev branch or a v* release tag — ignore PR builds and
-    # any other ref that happens to produce a successful Build run.
     if: >-
       github.event.workflow_run.conclusion == 'success' &&
       (github.event.workflow_run.head_branch == 'develop' ||
-       startsWith(github.event.workflow_run.head_branch, 'v'))
+       github.event.workflow_run.head_branch == 'main')
     runs-on: ubuntu-latest
-    environment: ${{ startsWith(github.event.workflow_run.head_branch, 'v') && 'prod' || 'dev' }}
+    environment: ${{ github.event.workflow_run.head_branch == 'main' && 'prod' || 'dev' }}
     steps:
       - name: Set environment vars
         id: vars
-        # On a v* tag build head_branch is the tag name (e.g. v1.2.0) -> prod,
-        # and the image tag is that version. Otherwise (develop) -> dev, and the
-        # image tag is the short commit SHA, matching what build.yml pushed.
         env:
           HEAD_BRANCH: ${{ github.event.workflow_run.head_branch }}
-          HEAD_SHA: ${{ github.event.workflow_run.head_sha }}
         run: |
-          if [[ "$HEAD_BRANCH" == v* ]]; then
+          if [ "$HEAD_BRANCH" = "main" ]; then
             echo "tf_workspace=prod" >> "$GITHUB_OUTPUT"
             echo "gitops_branch=main" >> "$GITHUB_OUTPUT"
             echo "values_file=values-prod.yaml" >> "$GITHUB_OUTPUT"
-            echo "image_tag=$HEAD_BRANCH" >> "$GITHUB_OUTPUT"
           else
             echo "tf_workspace=dev" >> "$GITHUB_OUTPUT"
             echo "gitops_branch=develop" >> "$GITHUB_OUTPUT"
             echo "values_file=values-dev.yaml" >> "$GITHUB_OUTPUT"
-            echo "image_tag=$(echo "$HEAD_SHA" | cut -c1-7)" >> "$GITHUB_OUTPUT"
           fi
+
+      - name: Download image tag artifact from the triggering Build run
+        uses: actions/download-artifact@v4
+        with:
+          name: image-tag
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+          run-id: ${{ github.event.workflow_run.id }}
+
+      - name: Read image tag
+        id: tag
+        run: echo "image_tag=$(cat image_tag.txt)" >> "$GITHUB_OUTPUT"
 
       - name: Checkout infra repo (read-only, for Terraform outputs)
         uses: actions/checkout@v4
@@ -84,7 +88,7 @@ jobs:
 
       - name: Bump image tag + IRSA annotations
         env:
-          IMAGE_TAG: ${{ steps.vars.outputs.image_tag }}
+          IMAGE_TAG: ${{ steps.tag.outputs.image_tag }}
           IRSA_ARNS_JSON: ${{ steps.tf-outputs.outputs.irsa_arns }}
           AWS_ACCOUNT_ID: ${{ secrets.AWS_ACCOUNT_ID }}
           VALUES_FILE: ${{ steps.vars.outputs.values_file }}
@@ -116,5 +120,24 @@ jobs:
           git config user.name "GitHub Actions Bot"
           git config user.email "actions@github.com"
           git add "helm/procurement-platform/${{ steps.vars.outputs.values_file }}"
-          git commit -m "chore: update ${{ steps.vars.outputs.tf_workspace }} image tag to ${{ steps.vars.outputs.image_tag }} [skip ci]" || echo "No changes to commit"
+          git commit -m "chore: update ${{ steps.vars.outputs.tf_workspace }} image tag to ${{ steps.tag.outputs.image_tag }} [skip ci]" || echo "No changes to commit"
           git push
+
+      - name: Send email
+        if: always()
+        uses: dawidd6/action-send-mail@v3
+        with:
+          server_address: ${{ secrets.SMTP_HOST }}
+          server_port: ${{ secrets.SMTP_PORT }}
+          username: ${{ secrets.SMTP_USERNAME }}
+          password: ${{ secrets.SMTP_PASSWORD }}
+          subject: "[Procurement Platform] Deploy ${{ job.status }} — ${{ steps.vars.outputs.tf_workspace }}"
+          to: ${{ secrets.NOTIFY_TO_EMAIL }}
+          from: Procurement Platform CI <${{ secrets.NOTIFY_FROM_EMAIL }}>
+          body: |
+            Deploy pipeline: ${{ job.status }}
+            Environment: ${{ steps.vars.outputs.tf_workspace }}
+            Image tag: ${{ steps.tag.outputs.image_tag }}
+            Gitops branch updated: ${{ steps.vars.outputs.gitops_branch }}
+
+            Run: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
