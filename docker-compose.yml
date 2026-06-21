@@ -1,0 +1,86 @@
+# True microservices: each backend service runs as its own container (its own
+# Dockerfile, non-root). The frontend's nginx path-routes /api/* to the right
+# service — there is NO custom API gateway. This mirrors the target EKS topology
+# (ALB Ingress → per-service Services), just with nginx locally.
+
+# Shared backend environment (anchored to avoid repetition).
+x-backend-env: &backend-env
+  NODE_ENV: ${NODE_ENV:-production}
+  AWS_REGION: ${AWS_REGION:-us-east-1}
+  AWS_S3_BUCKET: ${AWS_S3_BUCKET:-procurement-documents-08}
+  AWS_KMS_KEY_ID: ${AWS_KMS_KEY_ID:-}
+  AWS_SECRET_NAME: ${AWS_SECRET_NAME:-procurement/prod/app-config}
+  JWT_SECRET: ${JWT_SECRET:-dev_jwt_secret_change_in_production_12345}
+  JWT_REFRESH_SECRET: ${JWT_REFRESH_SECRET:-dev_jwt_refresh_secret_change_in_production_12345}
+  JWT_EXPIRY: 15m
+  JWT_REFRESH_EXPIRY: 7d
+  CORS_ORIGIN: ${CORS_ORIGIN:-http://localhost}
+
+services:
+  identity:
+    build: { context: ., dockerfile: backend/services/identity-service/Dockerfile }
+    container_name: procurement-identity
+    environment:
+      <<: *backend-env
+      PORT: 5001
+      SMTP_HOST: ${SMTP_HOST:-smtp.ethereal.email}
+      SMTP_PORT: ${SMTP_PORT:-587}
+      SMTP_USER: ${SMTP_USER:-}
+      SMTP_PASS: ${SMTP_PASS:-}
+      SMTP_FROM: ${SMTP_FROM:-noreply@procureflow.com}
+      FRONTEND_URL: ${FRONTEND_URL:-http://localhost}
+    restart: unless-stopped
+
+  finance:
+    build: { context: ., dockerfile: backend/services/finance-service/Dockerfile }
+    container_name: procurement-finance
+    environment:
+      <<: *backend-env
+      PORT: 5002
+    restart: unless-stopped
+
+  procurement:
+    build: { context: ., dockerfile: backend/services/procurement-service/Dockerfile }
+    container_name: procurement-procurement
+    environment:
+      <<: *backend-env
+      PORT: 5003
+    restart: unless-stopped
+
+  document:
+    build: { context: ., dockerfile: backend/services/document-service/Dockerfile }
+    container_name: procurement-document
+    environment:
+      <<: *backend-env
+      PORT: 5004
+    restart: unless-stopped
+
+  ai:
+    build: { context: ., dockerfile: backend/services/ai-service/Dockerfile }
+    container_name: procurement-ai
+    environment:
+      <<: *backend-env
+      PORT: 5006
+      AWS_BEDROCK_REGION: ${AWS_BEDROCK_REGION:-us-east-1}
+      AWS_BEDROCK_TEXT_MODEL_ID: ${AWS_BEDROCK_TEXT_MODEL_ID:-amazon.nova-pro-v1:0}
+      AWS_BEDROCK_EMBEDDING_MODEL_ID: ${AWS_BEDROCK_EMBEDDING_MODEL_ID:-amazon.nova-2-multimodal-embeddings-v1:0}
+      # Inter-service base URLs (ai-service calls the others over REST).
+      IDENTITY_SERVICE_URL: http://identity:5001
+      FINANCE_SERVICE_URL: http://finance:5002
+      PROCUREMENT_SERVICE_URL: http://procurement:5003
+      DOCUMENT_SERVICE_URL: http://document:5004
+    depends_on: [identity, finance, procurement, document]
+    restart: unless-stopped
+
+  frontend:
+    build: { context: ./frontend, dockerfile: Dockerfile }
+    container_name: procurement-frontend
+    ports:
+      - '80:80'
+    depends_on: [identity, finance, procurement, document, ai]
+    restart: unless-stopped
+
+# Note: the old in-process seed/bootstrap-admin one-shots (which built from the
+# removed gateway image) are retired. User accounts are managed via the running
+# identity-service (POST /api/auth/register, admin user-management). The admin
+# and demo accounts already exist in DynamoDB.

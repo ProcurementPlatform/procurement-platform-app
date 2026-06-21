@@ -1,0 +1,12 @@
+node_modules
+dist
+.env
+.env.local
+logs
+*.log
+.DS_Store
+build
+coverage
+
+# SSH keys / secrets — never commit
+*.pem

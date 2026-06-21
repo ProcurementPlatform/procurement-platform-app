@@ -1,0 +1,120 @@
+name: Deploy
+
+on:
+  workflow_run:
+    workflows: [Build]
+    types: [completed]
+
+permissions:
+  id-token: write
+  contents: read
+
+env:
+  AWS_REGION: us-east-1
+
+jobs:
+  deploy:
+    # Only deploy for the dev branch or a v* release tag — ignore PR builds and
+    # any other ref that happens to produce a successful Build run.
+    if: >-
+      github.event.workflow_run.conclusion == 'success' &&
+      (github.event.workflow_run.head_branch == 'develop' ||
+       startsWith(github.event.workflow_run.head_branch, 'v'))
+    runs-on: ubuntu-latest
+    environment: ${{ startsWith(github.event.workflow_run.head_branch, 'v') && 'prod' || 'dev' }}
+    steps:
+      - name: Set environment vars
+        id: vars
+        # On a v* tag build head_branch is the tag name (e.g. v1.2.0) -> prod,
+        # and the image tag is that version. Otherwise (develop) -> dev, and the
+        # image tag is the short commit SHA, matching what build.yml pushed.
+        env:
+          HEAD_BRANCH: ${{ github.event.workflow_run.head_branch }}
+          HEAD_SHA: ${{ github.event.workflow_run.head_sha }}
+        run: |
+          if [[ "$HEAD_BRANCH" == v* ]]; then
+            echo "tf_workspace=prod" >> "$GITHUB_OUTPUT"
+            echo "gitops_branch=main" >> "$GITHUB_OUTPUT"
+            echo "values_file=values-prod.yaml" >> "$GITHUB_OUTPUT"
+            echo "image_tag=$HEAD_BRANCH" >> "$GITHUB_OUTPUT"
+          else
+            echo "tf_workspace=dev" >> "$GITHUB_OUTPUT"
+            echo "gitops_branch=develop" >> "$GITHUB_OUTPUT"
+            echo "values_file=values-dev.yaml" >> "$GITHUB_OUTPUT"
+            echo "image_tag=$(echo "$HEAD_SHA" | cut -c1-7)" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Checkout infra repo (read-only, for Terraform outputs)
+        uses: actions/checkout@v4
+        with:
+          repository: ProcurementPlatform/procurement-platform-infra
+          path: infra
+
+      - name: Configure AWS credentials via OIDC
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ secrets.AWS_OIDC_ROLE_ARN }}
+          aws-region: ${{ env.AWS_REGION }}
+
+      - name: Setup Terraform
+        uses: hashicorp/setup-terraform@v3
+        with:
+          terraform_wrapper: false
+
+      - name: Read IRSA role ARNs from Terraform state
+        id: tf-outputs
+        working-directory: infra
+        run: |
+          terraform init
+          terraform workspace select ${{ steps.vars.outputs.tf_workspace }}
+          echo "irsa_arns=$(terraform output -json irsa_role_arns | jq -c .)" >> "$GITHUB_OUTPUT"
+
+      - name: Checkout gitops repo
+        uses: actions/checkout@v4
+        with:
+          repository: ProcurementPlatform/procurement-platform-gitops
+          ref: ${{ steps.vars.outputs.gitops_branch }}
+          token: ${{ secrets.GITOPS_PAT }}
+          path: gitops-repo
+
+      - name: Install yq
+        run: |
+          sudo wget -qO /usr/local/bin/yq https://github.com/mikefarah/yq/releases/latest/download/yq_linux_amd64
+          sudo chmod +x /usr/local/bin/yq
+
+      - name: Bump image tag + IRSA annotations
+        env:
+          IMAGE_TAG: ${{ steps.vars.outputs.image_tag }}
+          IRSA_ARNS_JSON: ${{ steps.tf-outputs.outputs.irsa_arns }}
+          AWS_ACCOUNT_ID: ${{ secrets.AWS_ACCOUNT_ID }}
+          VALUES_FILE: ${{ steps.vars.outputs.values_file }}
+        run: |
+          REGISTRY="${AWS_ACCOUNT_ID}.dkr.ecr.${AWS_REGION}.amazonaws.com"
+          VALUES="gitops-repo/helm/procurement-platform/${VALUES_FILE}"
+
+          declare -A REPO=(
+            [identity-service]=procurement-identity
+            [finance-service]=procurement-finance
+            [procurement-service]=procurement-procurement
+            [document-service]=procurement-document
+            [ai-service]=procurement-ai
+            [frontend]=procurement-frontend
+          )
+
+          for chart in "${!REPO[@]}"; do
+            irsa_arn=$(echo "$IRSA_ARNS_JSON" | jq -r --arg c "$chart" '.[$c] // ""')
+            yq -i ".\"$chart\".image.repository = \"$REGISTRY/${REPO[$chart]}\"" "$VALUES"
+            yq -i ".\"$chart\".image.tag = \"$IMAGE_TAG\"" "$VALUES"
+            if [ -n "$irsa_arn" ]; then
+              yq -i ".\"$chart\".serviceAccount.annotations.\"eks.amazonaws.com/role-arn\" = \"$irsa_arn\"" "$VALUES"
+            fi
+          done
+
+      - name: Commit and push to gitops repo
+        working-directory: gitops-repo
+        run: |
+          git config user.name "GitHub Actions Bot"
+          git config user.email "actions@github.com"
+          git add "helm/procurement-platform/${{ steps.vars.outputs.values_file }}"
+          git commit -m "chore: update ${{ steps.vars.outputs.tf_workspace }} image tag to ${{ steps.vars.outputs.image_tag }} [skip ci]" || echo "No changes to commit"
+          git push

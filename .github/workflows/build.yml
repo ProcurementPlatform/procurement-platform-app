@@ -1,0 +1,111 @@
+name: Build
+
+# dev = push to develop (images tagged with the commit SHA).
+# prod = push of a version tag like v1.2.0 (images tagged with that version).
+# Pushing to main alone does NOT release — cut a v* tag to ship to prod.
+on:
+  push:
+    branches: [develop]
+    tags: ['v*.*.*']
+  pull_request:
+    branches: [develop, main]
+
+permissions:
+  id-token: write
+  contents: read
+
+env:
+  AWS_REGION: us-east-1
+
+jobs:
+  lint-test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+      - run: npm ci
+      - run: npm run build:backend
+      - run: npm run build:frontend
+
+  build-scan-push:
+    needs: lint-test
+    if: github.event_name == 'push'
+    runs-on: ubuntu-latest
+    outputs:
+      image_tag: ${{ steps.vars.outputs.image_tag }}
+    strategy:
+      matrix:
+        include:
+          - service: identity-service
+            dockerfile: backend/services/identity-service/Dockerfile
+            context: .
+            repo: procurement-identity
+          - service: finance-service
+            dockerfile: backend/services/finance-service/Dockerfile
+            context: .
+            repo: procurement-finance
+          - service: procurement-service
+            dockerfile: backend/services/procurement-service/Dockerfile
+            context: .
+            repo: procurement-procurement
+          - service: document-service
+            dockerfile: backend/services/document-service/Dockerfile
+            context: .
+            repo: procurement-document
+          - service: ai-service
+            dockerfile: backend/services/ai-service/Dockerfile
+            context: .
+            repo: procurement-ai
+          - service: frontend
+            dockerfile: frontend/Dockerfile
+            context: frontend
+            repo: procurement-frontend
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set image tag
+        id: vars
+        # Version tag (refs/tags/v*) -> use the tag name for prod releases.
+        # Otherwise (develop branch) -> use the short commit SHA for dev.
+        run: |
+          if [[ "$GITHUB_REF" == refs/tags/* ]]; then
+            echo "image_tag=${GITHUB_REF_NAME}" >> "$GITHUB_OUTPUT"
+          else
+            echo "image_tag=$(git rev-parse --short HEAD)" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Build image
+        run: |
+          docker build -f ${{ matrix.dockerfile }} \
+            -t ${{ matrix.repo }}:${{ steps.vars.outputs.image_tag }} \
+            ${{ matrix.context }}
+
+      - name: Scan image (Trivy)
+        uses: aquasecurity/trivy-action@0.24.0
+        with:
+          image-ref: ${{ matrix.repo }}:${{ steps.vars.outputs.image_tag }}
+          severity: HIGH,CRITICAL
+          exit-code: '1'
+          ignore-unfixed: true
+
+      - name: Configure AWS credentials via OIDC
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ secrets.AWS_OIDC_ROLE_ARN }}
+          aws-region: ${{ env.AWS_REGION }}
+
+      - name: Login to Amazon ECR
+        id: login-ecr
+        uses: aws-actions/amazon-ecr-login@v2
+
+      - name: Push image
+        env:
+          REGISTRY: ${{ steps.login-ecr.outputs.registry }}
+          TAG: ${{ steps.vars.outputs.image_tag }}
+        run: |
+          docker tag ${{ matrix.repo }}:$TAG $REGISTRY/${{ matrix.repo }}:$TAG
+          docker tag ${{ matrix.repo }}:$TAG $REGISTRY/${{ matrix.repo }}:latest
+          docker push $REGISTRY/${{ matrix.repo }}:$TAG
+          docker push $REGISTRY/${{ matrix.repo }}:latest
