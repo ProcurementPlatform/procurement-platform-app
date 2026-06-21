@@ -1,0 +1,24 @@
+# These CVEs affect packages bundled internally by npm itself
+# (e.g., /usr/local/lib/node_modules/npm/node_modules/).
+# They are NOT in the application's own node_modules — the project's
+# package.json overrides ensure patched versions for app-level deps.
+# npm is upgraded to latest in each Dockerfile runtime stage to resolve these.
+
+# cross-spawn: ReDoS (fixed in 7.0.5+)
+CVE-2024-21538
+
+# glob: Command Injection (fixed in 10.5.0+ / 11.1.0+)
+CVE-2025-64756
+
+# minimatch: DoS via crafted glob patterns (fixed in 9.0.6+)
+CVE-2026-26996
+CVE-2026-27903
+CVE-2026-27904
+
+# tar (node-tar): path traversal / file overwrite (fixed in 7.5.3+)
+CVE-2026-23745
+CVE-2026-23950
+CVE-2026-24842
+CVE-2026-26960
+CVE-2026-29786
+CVE-2026-31802

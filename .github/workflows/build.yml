@@ -205,6 +205,7 @@ jobs:
           severity: HIGH,CRITICAL
           exit-code: '1'
           ignore-unfixed: true
+          trivyignores: .trivyignore
 
       - name: Push image
         if: github.event_name == 'push' && steps.check.outputs.exists != 'true'

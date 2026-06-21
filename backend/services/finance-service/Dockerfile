@@ -27,6 +27,7 @@ RUN npm ci --omit=dev --ignore-scripts
 FROM node:20-alpine
 
 RUN apk upgrade --no-cache \
+    && npm install -g npm@latest --ignore-scripts \
     && apk add --no-cache ca-certificates chromium freetype harfbuzz nss ttf-freefont \
     && addgroup -S app && adduser -S app -G app
 
