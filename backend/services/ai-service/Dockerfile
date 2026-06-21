@@ -1,12 +1,7 @@
-# ── @procurement/ai-service — standalone microservice image ──────────────────────────
-# Multi-stage, runs as a non-root user. Contains only the shared packages and
-# this service (no other services' code), per the true-microservices split.
 
-# Build stage
 FROM node:20-alpine AS builder
 WORKDIR /app
 
-# Install deps using only the workspaces this service needs (shared + itself).
 COPY package.json package-lock.json tsconfig.base.json ./
 COPY backend/shared/types/package.json ./backend/shared/types/
 COPY backend/shared/common/package.json ./backend/shared/common/
@@ -15,15 +10,14 @@ COPY backend/shared/utils/package.json ./backend/shared/utils/
 COPY backend/services/ai-service/package.json ./backend/services/ai-service/
 RUN npm install
 
-# Build shared packages then this service.
 COPY backend/shared ./backend/shared
 COPY backend/services/ai-service ./backend/services/ai-service
 RUN npm run build -w @procurement/types  && npm run build -w @procurement/common  && npm run build -w @procurement/utils  && npm run build -w @procurement/middleware  && npm run build -w @procurement/ai-service
 
-# Production stage
+RUN npm prune --omit=dev
+
 FROM node:20-alpine
 
-# Non-root user.
 RUN addgroup -S app && adduser -S app -G app
 
 WORKDIR /app

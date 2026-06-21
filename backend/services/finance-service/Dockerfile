@@ -1,12 +1,7 @@
-# ── @procurement/finance-service — standalone microservice image ──────────────────────────
-# Multi-stage, runs as a non-root user. Contains only the shared packages and
-# this service (no other services' code), per the true-microservices split.
 
-# Build stage
 FROM node:20-alpine AS builder
 WORKDIR /app
 
-# Install deps using only the workspaces this service needs (shared + itself).
 COPY package.json package-lock.json tsconfig.base.json ./
 COPY backend/shared/types/package.json ./backend/shared/types/
 COPY backend/shared/common/package.json ./backend/shared/common/
@@ -15,20 +10,19 @@ COPY backend/shared/utils/package.json ./backend/shared/utils/
 COPY backend/services/finance-service/package.json ./backend/services/finance-service/
 RUN npm install
 
-# Build shared packages then this service.
 COPY backend/shared ./backend/shared
 COPY backend/services/finance-service ./backend/services/finance-service
 RUN npm run build -w @procurement/types  && npm run build -w @procurement/common  && npm run build -w @procurement/utils  && npm run build -w @procurement/middleware  && npm run build -w @procurement/finance-service
 
-# Production stage
+RUN npm prune --omit=dev
+
 FROM node:20-alpine
 
-# Puppeteer (PDF generation) needs a real Chromium on Alpine/musl.
+RUN apk update && apk upgrade --no-cache
 RUN apk add --no-cache chromium nss freetype harfbuzz ca-certificates ttf-freefont
 ENV PUPPETEER_SKIP_DOWNLOAD=true
 ENV PUPPETEER_EXECUTABLE_PATH=/usr/bin/chromium-browser
 
-# Non-root user.
 RUN addgroup -S app && adduser -S app -G app
 
 WORKDIR /app
