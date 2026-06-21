@@ -62,17 +62,11 @@ jobs:
             -Dsonar.organization=procurementplatform
             -Dsonar.projectKey=procurement-platform-app
             -Dsonar.sources=backend,frontend/src
+            -Dsonar.qualitygate.wait=true
         env:
           SONAR_TOKEN: ${{ secrets.SONAR_TOKEN }}
           SONAR_HOST_URL: https://sonarcloud.io
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }} # lets Sonar detect PR context (base/head refs, PR number)
-
-      - name: SonarCloud Quality Gate
-        uses: SonarSource/sonarqube-quality-gate-action@v1
-        timeout-minutes: 5
-        env:
-          SONAR_TOKEN: ${{ secrets.SONAR_TOKEN }}
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
       - uses: snyk/actions/setup@master
       - name: Snyk scan
