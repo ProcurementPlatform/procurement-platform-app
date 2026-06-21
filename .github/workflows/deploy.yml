@@ -52,6 +52,8 @@ jobs:
         uses: actions/checkout@v4
         with:
           repository: ProcurementPlatform/procurement-platform-infra
+          ref: main
+          token: ${{ secrets.GITOPS_PAT }}
           path: infra
 
       - name: Configure AWS credentials via OIDC
