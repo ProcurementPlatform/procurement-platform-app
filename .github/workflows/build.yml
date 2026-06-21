@@ -13,6 +13,7 @@ on:
 permissions:
   id-token: write
   contents: write # needed to push the auto-generated semver tag on main
+  pull-requests: write # lets SonarCloud decorate the PR with analysis results
 
 env:
   AWS_REGION: us-east-1
@@ -60,12 +61,14 @@ jobs:
         env:
           SONAR_TOKEN: ${{ secrets.SONAR_TOKEN }}
           SONAR_HOST_URL: https://sonarcloud.io
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }} # needed so Sonar detects this is a PR (base/head refs, PR number), not a standalone branch scan
 
       - name: SonarCloud Quality Gate
         uses: SonarSource/sonarqube-quality-gate-action@v1
         timeout-minutes: 5
         env:
           SONAR_TOKEN: ${{ secrets.SONAR_TOKEN }}
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
       - uses: snyk/actions/setup@master
       - name: Snyk scan
