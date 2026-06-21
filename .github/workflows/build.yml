@@ -22,6 +22,7 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
+  # ---- Stage 1: lint/test -------------------------------------------------
   lint-test:
     runs-on: ubuntu-latest
     steps:
@@ -33,10 +34,11 @@ jobs:
       - run: npm run build:backend
       - run: npm run build:frontend
 
+  # ---- Stage 2: code scan (PR only) ---------------------------------------
   code-scan:
     name: SonarCloud + Snyk
-    if: github.event_name == 'pull_request'
     needs: [lint-test]
+    if: github.event_name == 'pull_request'
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -71,9 +73,18 @@ jobs:
         env:
           SNYK_TOKEN: ${{ secrets.SNYK_TOKEN }}
 
+  # ---- Stage 3: compute the image tag (push only) -------------------------
+  # Sequenced after code-scan (not parallel to it) — on a PR, code-scan ran
+  # and this stage is correctly skipped (push-only); on push, code-scan was
+  # itself skipped (PR-only) and this stage proceeds. Either way exactly one
+  # of the two ran, and this never starts before that's settled.
   generate-tag:
-    needs: [lint-test]
-    if: github.event_name == 'push'
+    needs: [lint-test, code-scan]
+    if: |
+      always() &&
+      needs.lint-test.result == 'success' &&
+      (needs.code-scan.result == 'success' || needs.code-scan.result == 'skipped') &&
+      github.event_name == 'push'
     runs-on: ubuntu-latest
     outputs:
       image_tag: ${{ steps.tag.outputs.tag }}
@@ -112,16 +123,16 @@ jobs:
           path: image_tag.txt
           retention-days: 1
 
+  # ---- Stage 4: build, scan, push ------------------------------------------
+  # Sequenced after generate-tag, which is itself sequenced after code-scan —
+  # so on a PR this only starts once code-scan has actually passed.
   build-scan-push:
-    needs: [lint-test, generate-tag]
-    # Runs on both events: PR gets build+Trivy as a pre-merge gate (no AWS
-    # calls at all, nothing pushed — just a throwaway local image scan).
-    # Push additionally logs into ECR, skips the build if that exact tag
-    # already exists, and pushes. `always()` is required because
-    # generate-tag is push-only and would otherwise be reported "skipped" on
-    # a PR run, which by default skips anything that needs it too.
+    needs: [lint-test, code-scan, generate-tag]
     if: |
-      always() && needs.lint-test.result == 'success' &&
+      always() &&
+      needs.lint-test.result == 'success' &&
+      (needs.code-scan.result == 'success' || needs.code-scan.result == 'skipped') &&
+      (needs.generate-tag.result == 'success' || needs.generate-tag.result == 'skipped') &&
       (github.event_name == 'push' || github.event_name == 'pull_request')
     runs-on: ubuntu-latest
     strategy:
@@ -187,7 +198,7 @@ jobs:
 
       - name: Scan image (Trivy)
         if: github.event_name == 'pull_request' || steps.check.outputs.exists != 'true'
-        uses: aquasecurity/trivy-action@0.24.0
+        uses: aquasecurity/trivy-action@master
         with:
           image-ref: ${{ matrix.repo }}:${{ env.TAG }}
           severity: HIGH,CRITICAL
@@ -204,9 +215,10 @@ jobs:
           docker push $REGISTRY/${{ matrix.repo }}:$TAG
           docker push $REGISTRY/${{ matrix.repo }}:latest
 
+  # ---- Stage 5: create the real release tag (main, push only) ------------
   create-release-tag:
     needs: [generate-tag, build-scan-push]
-    if: github.ref_name == 'main'
+    if: github.ref_name == 'main' && github.event_name == 'push'
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -222,6 +234,7 @@ jobs:
           git tag "$TAG"
           git push origin "$TAG"
 
+  # ---- Stage 6: notify (push only) ----------------------------------------
   notify:
     needs: [lint-test, code-scan, generate-tag, build-scan-push, create-release-tag]
     if: always() && github.event_name == 'push'
