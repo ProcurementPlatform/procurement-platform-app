@@ -35,23 +35,44 @@ jobs:
       - run: npm run build:backend
       - run: npm run build:frontend
 
-  # ---- Stage 2: dependency scan (PR only) ---------------------------------
-  # SonarCloud runs via its GitHub App "Automatic Analysis" (bound to this repo),
-  # which analyzes every PR on its own and posts a Quality Gate check directly
-  # on the PR — so it is intentionally NOT a step here (running the CI scanner
-  # too would conflict with Automatic Analysis). This job covers Snyk only.
+  # ---- Stage 2: code scan (PR only) ---------------------------------------
+  # CI-based SonarCloud scan + Quality Gate, then Snyk. NOTE: this requires
+  # SonarCloud "Automatic Analysis" to be DISABLED for this project
+  # (Administration -> Analysis Method) — the two analysis methods conflict
+  # and the CI scan errors out if both are on.
   code-scan:
-    name: Snyk
+    name: SonarCloud + Snyk
     needs: [lint-test]
     if: github.event_name == 'pull_request'
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
       - uses: actions/setup-node@v4
         with:
           node-version: 20
           cache: npm
       - run: npm ci
+
+      - name: SonarCloud scan
+        uses: SonarSource/sonarqube-scan-action@v6
+        with:
+          args: >
+            -Dsonar.organization=procurementplatform
+            -Dsonar.projectKey=procurement-platform-app
+            -Dsonar.sources=backend,frontend/src
+        env:
+          SONAR_TOKEN: ${{ secrets.SONAR_TOKEN }}
+          SONAR_HOST_URL: https://sonarcloud.io
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }} # lets Sonar detect PR context (base/head refs, PR number)
+
+      - name: SonarCloud Quality Gate
+        uses: SonarSource/sonarqube-quality-gate-action@v1
+        timeout-minutes: 5
+        env:
+          SONAR_TOKEN: ${{ secrets.SONAR_TOKEN }}
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
       - uses: snyk/actions/setup@master
       - name: Snyk scan
