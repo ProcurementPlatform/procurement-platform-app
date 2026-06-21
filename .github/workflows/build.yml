@@ -1,23 +1,29 @@
 name: Build
 
 # dev = push to develop (images tagged with the commit SHA).
-# prod = push of a version tag like v1.2.0 (images tagged with that version).
-# Pushing to main alone does NOT release — cut a v* tag to ship to prod.
+# prod = push to main (images tagged with an auto-generated semver, e.g. v1.2.3).
+# No `tags:` trigger on purpose — the semver tag this workflow pushes on main
+# would otherwise immediately re-trigger itself in a loop.
 on:
   push:
-    branches: [develop]
-    tags: ['v*.*.*']
+    branches: [develop, main]
   pull_request:
     branches: [develop, main]
 
 permissions:
   id-token: write
-  contents: read
+  contents: write # needed to push the auto-generated semver tag on main
+  pull-requests: write # lets SonarCloud decorate the PR with analysis results
 
 env:
   AWS_REGION: us-east-1
 
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
 jobs:
+  # ---- Stage 1: lint/test -------------------------------------------------
   lint-test:
     runs-on: ubuntu-latest
     steps:
@@ -29,12 +35,107 @@ jobs:
       - run: npm run build:backend
       - run: npm run build:frontend
 
-  build-scan-push:
-    needs: lint-test
-    if: github.event_name == 'push'
+  # ---- Stage 2: code scan (PR only) ---------------------------------------
+  # CI-based SonarCloud scan + Quality Gate, then Snyk. NOTE: this requires
+  # SonarCloud "Automatic Analysis" to be DISABLED for this project
+  # (Administration -> Analysis Method) — the two analysis methods conflict
+  # and the CI scan errors out if both are on.
+  code-scan:
+    name: SonarCloud + Snyk
+    needs: [lint-test]
+    if: github.event_name == 'pull_request'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: npm
+      - run: npm ci
+
+      - name: SonarCloud scan
+        uses: SonarSource/sonarqube-scan-action@v6
+        with:
+          args: >
+            -Dsonar.organization=procurementplatform
+            -Dsonar.projectKey=procurement-platform-app
+            -Dsonar.sources=backend,frontend/src
+            -Dsonar.qualitygate.wait=true
+        env:
+          SONAR_TOKEN: ${{ secrets.SONAR_TOKEN }}
+          SONAR_HOST_URL: https://sonarcloud.io
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }} # lets Sonar detect PR context (base/head refs, PR number)
+
+      - uses: snyk/actions/setup@master
+      - name: Snyk scan
+        run: snyk test --all-projects --severity-threshold=high
+        env:
+          SNYK_TOKEN: ${{ secrets.SNYK_TOKEN }}
+
+  # ---- Stage 3: compute the image tag (push only) -------------------------
+  # Sequenced after code-scan (not parallel to it) — on a PR, code-scan ran
+  # and this stage is correctly skipped (push-only); on push, code-scan was
+  # itself skipped (PR-only) and this stage proceeds. Either way exactly one
+  # of the two ran, and this never starts before that's settled.
+  generate-tag:
+    needs: [lint-test, code-scan]
+    if: |
+      always() &&
+      needs.lint-test.result == 'success' &&
+      (needs.code-scan.result == 'success' || needs.code-scan.result == 'skipped') &&
+      github.event_name == 'push'
     runs-on: ubuntu-latest
     outputs:
-      image_tag: ${{ steps.vars.outputs.image_tag }}
+      image_tag: ${{ steps.tag.outputs.tag }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Calculate next semver (main only, dry run — does not create the tag)
+        id: semver
+        if: github.ref_name == 'main'
+        uses: mathieudutour/github-tag-action@v6.2
+        with:
+          github_token: ${{ secrets.GITHUB_TOKEN }}
+          tag_prefix: v
+          default_bump: patch
+          dry_run: true
+
+      - name: Generate tag
+        id: tag
+        run: |
+          if [ "${{ github.ref_name }}" = "main" ]; then
+            echo "tag=${{ steps.semver.outputs.new_tag }}" >> "$GITHUB_OUTPUT"
+          else
+            echo "tag=$(git rev-parse --short HEAD)" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Upload image tag artifact
+        # deploy.yml (triggered via workflow_run) can't read this job's output
+        # directly across that boundary — it downloads this artifact instead,
+        # scoped to this exact run via run-id.
+        run: echo "${{ steps.tag.outputs.tag }}" > image_tag.txt
+      - uses: actions/upload-artifact@v4
+        with:
+          name: image-tag
+          path: image_tag.txt
+          retention-days: 1
+
+  # ---- Stage 4: build, scan, push ------------------------------------------
+  # Sequenced after generate-tag, which is itself sequenced after code-scan —
+  # so on a PR this only starts once code-scan has actually passed.
+  build-scan-push:
+    needs: [lint-test, code-scan, generate-tag]
+    if: |
+      always() &&
+      needs.lint-test.result == 'success' &&
+      (needs.code-scan.result == 'success' || needs.code-scan.result == 'skipped') &&
+      (needs.generate-tag.result == 'success' || needs.generate-tag.result == 'skipped') &&
+      (github.event_name == 'push' || github.event_name == 'pull_request')
+    runs-on: ubuntu-latest
     strategy:
       matrix:
         include:
@@ -62,50 +163,113 @@ jobs:
             dockerfile: frontend/Dockerfile
             context: frontend
             repo: procurement-frontend
+    env:
+      TAG: ${{ github.event_name == 'push' && needs.generate-tag.outputs.image_tag || github.sha }}
     steps:
       - uses: actions/checkout@v4
 
-      - name: Set image tag
-        id: vars
-        # Version tag (refs/tags/v*) -> use the tag name for prod releases.
-        # Otherwise (develop branch) -> use the short commit SHA for dev.
-        run: |
-          if [[ "$GITHUB_REF" == refs/tags/* ]]; then
-            echo "image_tag=${GITHUB_REF_NAME}" >> "$GITHUB_OUTPUT"
-          else
-            echo "image_tag=$(git rev-parse --short HEAD)" >> "$GITHUB_OUTPUT"
-          fi
-
-      - name: Build image
-        run: |
-          docker build -f ${{ matrix.dockerfile }} \
-            -t ${{ matrix.repo }}:${{ steps.vars.outputs.image_tag }} \
-            ${{ matrix.context }}
-
-      - name: Scan image (Trivy)
-        uses: aquasecurity/trivy-action@0.24.0
-        with:
-          image-ref: ${{ matrix.repo }}:${{ steps.vars.outputs.image_tag }}
-          severity: HIGH,CRITICAL
-          exit-code: '1'
-          ignore-unfixed: true
-
       - name: Configure AWS credentials via OIDC
+        if: github.event_name == 'push'
         uses: aws-actions/configure-aws-credentials@v4
         with:
           role-to-assume: ${{ secrets.AWS_OIDC_ROLE_ARN }}
           aws-region: ${{ env.AWS_REGION }}
 
       - name: Login to Amazon ECR
+        if: github.event_name == 'push'
         id: login-ecr
         uses: aws-actions/amazon-ecr-login@v2
 
+      - name: Check if this tag already exists in ECR
+        if: github.event_name == 'push'
+        id: check
+        run: |
+          if aws ecr describe-images --repository-name ${{ matrix.repo }} --image-ids imageTag="$TAG" --region "$AWS_REGION" >/dev/null 2>&1; then
+            echo "exists=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "exists=false" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Build image
+        if: github.event_name == 'pull_request' || steps.check.outputs.exists != 'true'
+        run: |
+          docker build -f ${{ matrix.dockerfile }} \
+            -t ${{ matrix.repo }}:$TAG \
+            ${{ matrix.context }}
+
+      - name: Scan image (Trivy)
+        if: github.event_name == 'pull_request' || steps.check.outputs.exists != 'true'
+        uses: aquasecurity/trivy-action@master
+        with:
+          image-ref: ${{ matrix.repo }}:${{ env.TAG }}
+          severity: HIGH,CRITICAL
+          exit-code: '1'
+          ignore-unfixed: true
+          trivyignores: .trivyignore
+
       - name: Push image
+        if: github.event_name == 'push' && steps.check.outputs.exists != 'true'
         env:
           REGISTRY: ${{ steps.login-ecr.outputs.registry }}
-          TAG: ${{ steps.vars.outputs.image_tag }}
         run: |
           docker tag ${{ matrix.repo }}:$TAG $REGISTRY/${{ matrix.repo }}:$TAG
           docker tag ${{ matrix.repo }}:$TAG $REGISTRY/${{ matrix.repo }}:latest
           docker push $REGISTRY/${{ matrix.repo }}:$TAG
           docker push $REGISTRY/${{ matrix.repo }}:latest
+
+  # ---- Stage 5: create the real release tag (main, push only) ------------
+  create-release-tag:
+    needs: [generate-tag, build-scan-push]
+    if: github.ref_name == 'main' && github.event_name == 'push'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Create and push the real git tag
+        run: |
+          TAG="${{ needs.generate-tag.outputs.image_tag }}"
+          if git rev-parse "$TAG" >/dev/null 2>&1; then
+            echo "Tag $TAG already exists — skipping"
+            exit 0
+          fi
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git tag "$TAG"
+          git push origin "$TAG"
+
+  # ---- Stage 6: notify (push only) ----------------------------------------
+  notify:
+    needs: [lint-test, code-scan, generate-tag, build-scan-push, create-release-tag]
+    if: always() && github.event_name == 'push'
+    runs-on: ubuntu-latest
+    steps:
+      - name: Determine overall status
+        id: status
+        run: |
+          if [[ "${{ contains(needs.*.result, 'failure') }}" == "true" ]]; then
+            echo "overall=FAILED" >> "$GITHUB_OUTPUT"
+          else
+            echo "overall=SUCCESS" >> "$GITHUB_OUTPUT"
+          fi
+      - name: Send email
+        uses: dawidd6/action-send-mail@v3
+        with:
+          server_address: ${{ secrets.SMTP_HOST }}
+          server_port: ${{ secrets.SMTP_PORT }}
+          username: ${{ secrets.SMTP_USERNAME }}
+          password: ${{ secrets.SMTP_PASSWORD }}
+          subject: "[Procurement Platform] Build ${{ steps.status.outputs.overall }} — ${{ github.ref_name }}"
+          to: ${{ secrets.NOTIFY_TO_EMAIL }}
+          from: Procurement Platform CI <${{ secrets.NOTIFY_FROM_EMAIL }}>
+          body: |
+            Build pipeline: ${{ steps.status.outputs.overall }}
+            Branch: ${{ github.ref_name }}
+            Commit: ${{ github.sha }}
+            Actor: ${{ github.actor }}
+            Image tag: ${{ needs.generate-tag.outputs.image_tag }}
+
+            Stage results:
+            - lint/test: ${{ needs.lint-test.result }}
+            - build/scan/push: ${{ needs.build-scan-push.result }}
+            - release tag: ${{ needs.create-release-tag.result }}
+
+            Run: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}

@@ -1,46 +1,48 @@
-# ── @procurement/identity-service — standalone microservice image ──────────────────────────
-# Multi-stage, runs as a non-root user. Contains only the shared packages and
-# this service (no other services' code), per the true-microservices split.
-
-# Build stage
 FROM node:20-alpine AS builder
 WORKDIR /app
 
-# Install deps using only the workspaces this service needs (shared + itself).
 COPY package.json package-lock.json tsconfig.base.json ./
 COPY backend/shared/types/package.json ./backend/shared/types/
 COPY backend/shared/common/package.json ./backend/shared/common/
 COPY backend/shared/middleware/package.json ./backend/shared/middleware/
 COPY backend/shared/utils/package.json ./backend/shared/utils/
 COPY backend/services/identity-service/package.json ./backend/services/identity-service/
-RUN npm install
+RUN npm ci --ignore-scripts
 
-# Build shared packages then this service.
 COPY backend/shared ./backend/shared
 COPY backend/services/identity-service ./backend/services/identity-service
 RUN npm run build -w @procurement/types  && npm run build -w @procurement/common  && npm run build -w @procurement/utils  && npm run build -w @procurement/middleware  && npm run build -w @procurement/identity-service
 
-# Production stage
+FROM node:20-alpine AS prod-deps
+WORKDIR /app
+
+COPY package.json package-lock.json tsconfig.base.json ./
+COPY backend/shared/types/package.json ./backend/shared/types/
+COPY backend/shared/common/package.json ./backend/shared/common/
+COPY backend/shared/middleware/package.json ./backend/shared/middleware/
+COPY backend/shared/utils/package.json ./backend/shared/utils/
+COPY backend/services/identity-service/package.json ./backend/services/identity-service/
+RUN npm ci --omit=dev --ignore-scripts
+
 FROM node:20-alpine
 
-# Puppeteer (PDF generation) needs a real Chromium on Alpine/musl.
-RUN apk add --no-cache chromium nss freetype harfbuzz ca-certificates ttf-freefont
+RUN apk upgrade --no-cache \
+    && apk add --no-cache ca-certificates chromium freetype harfbuzz nss ttf-freefont \
+    && addgroup -S app && adduser -S app -G app
+
 ENV PUPPETEER_SKIP_DOWNLOAD=true
 ENV PUPPETEER_EXECUTABLE_PATH=/usr/bin/chromium-browser
-
-# Non-root user.
-RUN addgroup -S app && adduser -S app -G app
-
-WORKDIR /app
-COPY --from=builder /app/node_modules ./node_modules
-COPY --from=builder /app/package.json ./
-COPY --from=builder /app/backend/shared ./backend/shared
-COPY --from=builder /app/backend/services/identity-service ./backend/services/identity-service
-
 ENV NODE_ENV=production
 ENV PORT=5001
+
+WORKDIR /app
+COPY --chown=app:app --from=prod-deps /app/node_modules ./node_modules
+COPY --chown=app:app --from=builder /app/package.json ./
+COPY --chown=app:app --from=builder /app/backend/shared ./backend/shared
+COPY --chown=app:app --from=builder /app/backend/services/identity-service ./backend/services/identity-service
+
+RUN mkdir -p logs && chown app:app logs
 EXPOSE 5001
-RUN mkdir -p logs && chown -R app:app /app
 USER app
 
 CMD ["node", "backend/services/identity-service/dist/server.js"]
