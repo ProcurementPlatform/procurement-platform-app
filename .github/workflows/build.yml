@@ -113,8 +113,16 @@ jobs:
           retention-days: 1
 
   build-scan-push:
-    needs: [generate-tag]
-    if: github.event_name == 'push'
+    needs: [lint-test, generate-tag]
+    # Runs on both events: PR gets build+Trivy as a pre-merge gate (no AWS
+    # calls at all, nothing pushed — just a throwaway local image scan).
+    # Push additionally logs into ECR, skips the build if that exact tag
+    # already exists, and pushes. `always()` is required because
+    # generate-tag is push-only and would otherwise be reported "skipped" on
+    # a PR run, which by default skips anything that needs it too.
+    if: |
+      always() && needs.lint-test.result == 'success' &&
+      (github.event_name == 'push' || github.event_name == 'pull_request')
     runs-on: ubuntu-latest
     strategy:
       matrix:
@@ -144,21 +152,24 @@ jobs:
             context: frontend
             repo: procurement-frontend
     env:
-      TAG: ${{ needs.generate-tag.outputs.image_tag }}
+      TAG: ${{ github.event_name == 'push' && needs.generate-tag.outputs.image_tag || github.sha }}
     steps:
       - uses: actions/checkout@v4
 
       - name: Configure AWS credentials via OIDC
+        if: github.event_name == 'push'
         uses: aws-actions/configure-aws-credentials@v4
         with:
           role-to-assume: ${{ secrets.AWS_OIDC_ROLE_ARN }}
           aws-region: ${{ env.AWS_REGION }}
 
       - name: Login to Amazon ECR
+        if: github.event_name == 'push'
         id: login-ecr
         uses: aws-actions/amazon-ecr-login@v2
 
       - name: Check if this tag already exists in ECR
+        if: github.event_name == 'push'
         id: check
         run: |
           if aws ecr describe-images --repository-name ${{ matrix.repo }} --image-ids imageTag="$TAG" --region "$AWS_REGION" >/dev/null 2>&1; then
@@ -168,14 +179,14 @@ jobs:
           fi
 
       - name: Build image
-        if: steps.check.outputs.exists != 'true'
+        if: github.event_name == 'pull_request' || steps.check.outputs.exists != 'true'
         run: |
           docker build -f ${{ matrix.dockerfile }} \
             -t ${{ matrix.repo }}:$TAG \
             ${{ matrix.context }}
 
       - name: Scan image (Trivy)
-        if: steps.check.outputs.exists != 'true'
+        if: github.event_name == 'pull_request' || steps.check.outputs.exists != 'true'
         uses: aquasecurity/trivy-action@0.24.0
         with:
           image-ref: ${{ matrix.repo }}:${{ env.TAG }}
@@ -184,7 +195,7 @@ jobs:
           ignore-unfixed: true
 
       - name: Push image
-        if: steps.check.outputs.exists != 'true'
+        if: github.event_name == 'push' && steps.check.outputs.exists != 'true'
         env:
           REGISTRY: ${{ steps.login-ecr.outputs.registry }}
         run: |
