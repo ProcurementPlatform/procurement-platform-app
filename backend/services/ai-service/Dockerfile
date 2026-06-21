@@ -27,7 +27,6 @@ RUN npm ci --omit=dev --ignore-scripts
 FROM node:20-alpine
 
 RUN apk upgrade --no-cache \
-    && npm install -g npm@latest --ignore-scripts \
     && addgroup -S app && adduser -S app -G app
 
 ENV NODE_ENV=production
