@@ -71,7 +71,10 @@ jobs:
         id: tf-outputs
         working-directory: infra
         run: |
-          terraform init
+          terraform init \
+            -backend-config="bucket=${{ secrets.TF_STATE_BUCKET }}" \
+            -backend-config="region=${{ env.AWS_REGION }}" \
+            -backend-config="dynamodb_table=terraform-state-lock"
           terraform workspace select ${{ steps.vars.outputs.tf_workspace }}
           echo "irsa_arns=$(terraform output -json irsa_role_arns | jq -c .)" >> "$GITHUB_OUTPUT"
 
