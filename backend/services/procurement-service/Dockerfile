@@ -7,7 +7,7 @@ COPY backend/shared/common/package.json ./backend/shared/common/
 COPY backend/shared/middleware/package.json ./backend/shared/middleware/
 COPY backend/shared/utils/package.json ./backend/shared/utils/
 COPY backend/services/procurement-service/package.json ./backend/services/procurement-service/
-RUN npm install --ignore-scripts
+RUN npm ci --ignore-scripts
 
 COPY backend/shared ./backend/shared
 COPY backend/services/procurement-service ./backend/services/procurement-service

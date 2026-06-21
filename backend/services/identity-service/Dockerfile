@@ -7,7 +7,7 @@ COPY backend/shared/common/package.json ./backend/shared/common/
 COPY backend/shared/middleware/package.json ./backend/shared/middleware/
 COPY backend/shared/utils/package.json ./backend/shared/utils/
 COPY backend/services/identity-service/package.json ./backend/services/identity-service/
-RUN npm install --ignore-scripts
+RUN npm ci --ignore-scripts
 
 COPY backend/shared ./backend/shared
 COPY backend/services/identity-service ./backend/services/identity-service
@@ -27,7 +27,7 @@ RUN npm ci --omit=dev --ignore-scripts
 FROM node:20-alpine
 
 RUN apk upgrade --no-cache \
-    && apk add --no-cache chromium nss freetype harfbuzz ca-certificates ttf-freefont \
+    && apk add --no-cache ca-certificates chromium freetype harfbuzz nss ttf-freefont \
     && addgroup -S app && adduser -S app -G app
 
 ENV PUPPETEER_SKIP_DOWNLOAD=true
