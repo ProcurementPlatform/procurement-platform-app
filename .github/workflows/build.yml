@@ -60,7 +60,7 @@ jobs:
         with:
           args: >
             -Dsonar.organization=procurementplatform
-            -Dsonar.projectKey=procurement-platform-app
+            -Dsonar.projectKey=ProcurementPlatform_procurement-platform-app
             -Dsonar.sources=backend,frontend/src
             -Dsonar.qualitygate.wait=true
         env:
