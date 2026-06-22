@@ -11,5 +11,5 @@ COPY --from=builder /app/build /usr/share/nginx/html
 COPY nginx-main.conf /etc/nginx/nginx.conf
 COPY nginx.conf /etc/nginx/conf.d/default.conf
 COPY proxy.inc /etc/nginx/conf.d/proxy.inc
-EXPOSE 80
+EXPOSE 8080
 CMD ["nginx", "-g", "daemon off;"]
