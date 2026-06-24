@@ -1,9 +1,5 @@
 name: Build
 
-# dev = push to develop (images tagged with the commit SHA).
-# prod = push to main (images tagged with an auto-generated semver, e.g. v1.2.3).
-# No `tags:` trigger on purpose — the semver tag this workflow pushes on main
-# would otherwise immediately re-trigger itself in a loop.
 on:
   push:
     branches: [develop, main]
@@ -12,8 +8,8 @@ on:
 
 permissions:
   id-token: write
-  contents: write # needed to push the auto-generated semver tag on main
-  pull-requests: write # lets SonarCloud decorate the PR with analysis results
+  contents: write 
+  pull-requests: write
 
 env:
   AWS_REGION: us-east-1
@@ -36,10 +32,6 @@ jobs:
       - run: npm run build:frontend
 
   # ---- Stage 2: code scan (PR only) ---------------------------------------
-  # CI-based SonarCloud scan + Quality Gate, then Snyk. NOTE: this requires
-  # SonarCloud "Automatic Analysis" to be DISABLED for this project
-  # (Administration -> Analysis Method) — the two analysis methods conflict
-  # and the CI scan errors out if both are on.
   code-scan:
     name: SonarCloud + Snyk
     needs: [lint-test]
@@ -56,13 +48,6 @@ jobs:
       - run: npm ci
 
       - name: SonarCloud scan
-        # Runs on every PR for code-quality analysis + PR decoration. NOT
-        # gated with qualitygate.wait: SonarCloud's free plan only allows the
-        # built-in "Sonar way" gate (custom gates require a paid plan), and
-        # that gate hard-requires 80% coverage on new code — unachievable
-        # without an automated test suite, which is out of scope here. So the
-        # scan is informational (the result still shows on the dashboard and
-        # the PR), it just doesn't fail the build on the coverage threshold.
         uses: SonarSource/sonarqube-scan-action@v6
         with:
           args: >
@@ -81,10 +66,6 @@ jobs:
           SNYK_TOKEN: ${{ secrets.SNYK_TOKEN }}
 
   # ---- Stage 3: compute the image tag (push only) -------------------------
-  # Sequenced after code-scan (not parallel to it) — on a PR, code-scan ran
-  # and this stage is correctly skipped (push-only); on push, code-scan was
-  # itself skipped (PR-only) and this stage proceeds. Either way exactly one
-  # of the two ran, and this never starts before that's settled.
   generate-tag:
     needs: [lint-test, code-scan]
     if: |
@@ -120,9 +101,6 @@ jobs:
           fi
 
       - name: Upload image tag artifact
-        # deploy.yml (triggered via workflow_run) can't read this job's output
-        # directly across that boundary — it downloads this artifact instead,
-        # scoped to this exact run via run-id.
         run: echo "${{ steps.tag.outputs.tag }}" > image_tag.txt
       - uses: actions/upload-artifact@v4
         with:
@@ -131,8 +109,6 @@ jobs:
           retention-days: 1
 
   # ---- Stage 4: build, scan, push ------------------------------------------
-  # Sequenced after generate-tag, which is itself sequenced after code-scan —
-  # so on a PR this only starts once code-scan has actually passed.
   build-scan-push:
     needs: [lint-test, code-scan, generate-tag]
     if: |
